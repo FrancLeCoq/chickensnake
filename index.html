@@ -790,6 +790,16 @@ function onGridCross(){
   if(c.walls&&(nx<1||nx>=COLS-1||ny<1||ny>=ROWS-1)){ gameOver(); return; }
   headGx=nx; headGy=ny;
 
+  // ── ANTI-DRIFT: snap head pixel to the new cell center, then re-apply the
+  //    leftover sub-cell distance along the CURRENT direction. This keeps the
+  //    drawn position (hpx/hpy) perfectly aligned with the grid (headGx/headGy),
+  //    so death detection always matches what the player sees. ──
+  if(!didWrap){
+    const carry = distSinceGrid; // 0..CELL already moved into the new cell
+    hpx = headGx*CELL + CELL/2 + dir.x*carry;
+    hpy = headGy*CELL + CELL/2 + dir.y*carry;
+  }
+
   // Progressive wrap: do NOT teleport. The head pixel keeps moving past the
   // edge; drawing + position lookups wrap modulo the board. We only normalize
   // the absolute pixel coords (and the whole path) by exactly one board span
