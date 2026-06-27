@@ -785,6 +785,8 @@ function onGridCross(){
     if(wx!==nx||wy!==ny)didWrap=true;
     nx=wx; ny=wy;
   }
+  // Walls/obstacles handled by checkDeath (prog>0.5). If we somehow reach here
+  // entering a wall, end the game as a safety net.
   if(c.walls&&(nx<1||nx>=COLS-1||ny<1||ny>=ROWS-1)){ gameOver(); return; }
   headGx=nx; headGy=ny;
 
@@ -817,24 +819,39 @@ function onGridCross(){
 function checkDeath(){
   if(bInv) return;
   const c=lcfg();
-  // LEADING EDGE of the head front, symmetric on all 4 sides.
-  const lead = CELL*0.45;
-  const fx = hpx + dir.x*lead, fy = hpy + dir.y*lead;
-  const cgx=Math.floor(wrapX(fx)/CELL), cgy=Math.floor(wrapY(fy)/CELL);
+  // GRID-BASED detection tied to the head's official cell (headGx,headGy) — this
+  // always matches what is drawn, unlike raw pixel coords which can drift.
+  // progress = how far (0..1) the head has moved into the cell it is entering.
+  const prog = distSinceGrid / CELL;
+  // The cell the head currently OCCUPIES (its body center):
+  const curGx = headGx, curGy = headGy;
+  // The NEXT cell it is advancing into:
+  const nextGx = headGx + dir.x, nextGy = headGy + dir.y;
+
+  // ── WALLS: the ring is cols/rows 0 and COLS-1/ROWS-1. Kill the instant the
+  //    head's front crosses into a wall cell (when prog passes ~0.5 of the move). ──
   if(c.walls){
-    if(cgx<1||cgx>=COLS-1||cgy<1||cgy>=ROWS-1){ gameOver(); return; }
+    const wallCell=(gx,gy)=> gx<1||gx>=COLS-1||gy<1||gy>=ROWS-1;
+    if(wallCell(curGx,curGy)){ gameOver(); return; }
+    if(wallCell(nextGx,nextGy) && prog>0.5){ gameOver(); return; }
   }
-  for(const o of obstacles){
-    if(o.gx===cgx && o.gy===cgy){
-      if(o.bomb && o.armed===false) continue;
-      gameOver(); return;
+
+  // ── OBSTACLES: impassable. Kill when the head's front enters the obstacle cell. ──
+  const hitObs=(gx,gy)=>{
+    for(const o of obstacles){
+      if(o.gx===gx&&o.gy===gy){ if(o.bomb&&o.armed===false) continue; return true; }
     }
-  }
-  // armed bombs
-  for(const b of bombs){
-    if(b.armed && b.gx===cgx && b.gy===cgy){ gameOver(); return; }
-  }
-  // self collision — pixel distance against body members (skip just after wrap)
+    return false;
+  };
+  if(hitObs(curGx,curGy)){ gameOver(); return; }
+  if(hitObs(nextGx,nextGy) && prog>0.5){ gameOver(); return; }
+
+  // ── ARMED BOMBS ──
+  const hitBomb=(gx,gy)=>bombs.some(b=>b.armed&&b.gx===gx&&b.gy===gy);
+  if(hitBomb(curGx,curGy)){ gameOver(); return; }
+  if(hitBomb(nextGx,nextGy) && prog>0.5){ gameOver(); return; }
+
+  // ── SELF COLLISION (pixel distance, skip just after wrap) ──
   if(justWrapped>0) return;
   for(let i=4;i<segGrids.length;i++){
     const p=segPos(i);
