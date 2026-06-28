@@ -778,8 +778,13 @@ function spawnOneFood(){
    and updates the grid list. Death is handled pixel-perfectly in rafLoop. */
 function onGridCross(){
   const c=lcfg();
-  if(ndir.x!==-dir.x||ndir.y!==-dir.y){ dir={...ndir}; hdx=dir.x*pixelSpeed; hdy=dir.y*pixelSpeed; }
-  let nx=headGx+dir.x, ny=headGy+dir.y, didWrap=false;
+  // Direction the head TRAVELLED to reach this crossing (before any turn).
+  const od={x:dir.x, y:dir.y};
+  // 1. Commit the cell actually reached, using the travel direction. Doing this
+  //    BEFORE applying a queued turn is essential: otherwise the new cell is
+  //    computed from a stale headGx and the head snaps back a cell on every
+  //    turn (the "décalage d'un cran").
+  let nx=headGx+od.x, ny=headGy+od.y, didWrap=false;
   if(c.wrap){
     const wx=((nx%COLS)+COLS)%COLS, wy=((ny%ROWS)+ROWS)%ROWS;
     if(wx!==nx||wy!==ny)didWrap=true;
@@ -789,6 +794,10 @@ function onGridCross(){
   // here while entering a wall, end the game as an extra safety net.
   if(c.walls&&(nx<1||nx>=COLS-1||ny<1||ny>=ROWS-1)){ gameOver(); return; }
   headGx=nx; headGy=ny;
+
+  // 2. NOW apply the queued turn — it pivots from THIS cell's centre, exactly
+  //    where the head is, instead of one cell back.
+  if(ndir.x!==-dir.x||ndir.y!==-dir.y){ dir={...ndir}; hdx=dir.x*pixelSpeed; hdy=dir.y*pixelSpeed; }
 
   // ── ANTI-DRIFT: snap head pixel to the new cell center, then re-apply the
   //    leftover sub-cell distance along the CURRENT direction. This keeps the
@@ -807,8 +816,8 @@ function onGridCross(){
   // multiple of W/H and every draw call already wraps modulo W/H.
   if(didWrap){
     let shiftX=0, shiftY=0;
-    if(dir.x>0) shiftX=-PFW; else if(dir.x<0) shiftX=PFW;
-    if(dir.y>0) shiftY=-PFH; else if(dir.y<0) shiftY=PFH;
+    if(od.x>0) shiftX=-PFW; else if(od.x<0) shiftX=PFW;
+    if(od.y>0) shiftY=-PFH; else if(od.y<0) shiftY=PFH;
     hpx+=shiftX; hpy+=shiftY;
     for(const pt of path){ pt.x+=shiftX; pt.y+=shiftY; }
     justWrapped=2; // grace frames for self-collision right after wrap
