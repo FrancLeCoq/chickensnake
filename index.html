@@ -785,8 +785,8 @@ function onGridCross(){
     if(wx!==nx||wy!==ny)didWrap=true;
     nx=wx; ny=wy;
   }
-  // Walls/obstacles handled by checkDeath (prog>0.5). If we somehow reach here
-  // entering a wall, end the game as a safety net.
+  // Solid tiles are handled pixel-perfectly in checkDeath. If we somehow reach
+  // here while entering a wall, end the game as an extra safety net.
   if(c.walls&&(nx<1||nx>=COLS-1||ny<1||ny>=ROWS-1)){ gameOver(); return; }
   headGx=nx; headGy=ny;
 
@@ -823,43 +823,32 @@ function onGridCross(){
   }
 }
 
-/* Pixel-perfect death check — runs every frame.
-   The head dies the instant its CENTER enters an obstacle/wall cell,
-   i.e. exactly where the colored tile begins. */
+/* Death check — runs every frame.
+   Solid tiles (walls / obstacles / armed bombs) are detected from the head's
+   REAL pixel position, not from the grid-cross + progress counter. The old grid
+   approach could "skip" a tile in a single frame at high speed (so the head ran
+   straight through a wall), and obstacles had no safety net at all — that's why
+   they felt completely dead. The pixel leading-edge test below is frame-rate
+   independent: it kills the instant the head's front touches a deadly tile. */
 function checkDeath(){
   if(bInv) return;
   const c=lcfg();
-  // GRID-BASED detection tied to the head's official cell (headGx,headGy) — this
-  // always matches what is drawn, unlike raw pixel coords which can drift.
-  // progress = how far (0..1) the head has moved into the cell it is entering.
-  const prog = distSinceGrid / CELL;
-  // The cell the head currently OCCUPIES (its body center):
-  const curGx = headGx, curGy = headGy;
-  // The NEXT cell it is advancing into:
-  const nextGx = headGx + dir.x, nextGy = headGy + dir.y;
 
-  // ── WALLS: the ring is cols/rows 0 and COLS-1/ROWS-1. Kill the instant the
-  //    head's front crosses into a wall cell (when prog passes ~0.5 of the move). ──
-  if(c.walls){
-    const wallCell=(gx,gy)=> gx<1||gx>=COLS-1||gy<1||gy>=ROWS-1;
-    if(wallCell(curGx,curGy)){ gameOver(); return; }
-    if(wallCell(nextGx,nextGy) && prog>0.15){ gameOver(); return; }
-  }
+  // What counts as a deadly tile.
+  const isWall =(gx,gy)=> c.walls && (gx<1||gx>=COLS-1||gy<1||gy>=ROWS-1);
+  const isObs  =(gx,gy)=> obstacles.some(o=> o.gx===gx && o.gy===gy && !(o.bomb && o.armed===false));
+  const isBomb =(gx,gy)=> bombs.some(b=> b.armed && b.gx===gx && b.gy===gy);
+  const deadly =(gx,gy)=> isWall(gx,gy) || isObs(gx,gy) || isBomb(gx,gy);
+  // Pixel → grid cell, wrap-aware (board can scroll by whole spans on wrap levels).
+  const cellX =(px)=> Math.floor((((px%PFW)+PFW)%PFW)/CELL);
+  const cellY =(py)=> Math.floor((((py%PFH)+PFH)%PFH)/CELL);
 
-  // ── OBSTACLES: impassable. Kill when the head's front enters the obstacle cell. ──
-  const hitObs=(gx,gy)=>{
-    for(const o of obstacles){
-      if(o.gx===gx&&o.gy===gy){ if(o.bomb&&o.armed===false) continue; return true; }
-    }
-    return false;
-  };
-  if(hitObs(curGx,curGy)){ gameOver(); return; }
-  if(hitObs(nextGx,nextGy) && prog>0.15){ gameOver(); return; }
-
-  // ── ARMED BOMBS ──
-  const hitBomb=(gx,gy)=>bombs.some(b=>b.armed&&b.gx===gx&&b.gy===gy);
-  if(hitBomb(curGx,curGy)){ gameOver(); return; }
-  if(hitBomb(nextGx,nextGy) && prog>0.15){ gameOver(); return; }
+  // Leading edge ~0.35 cell ahead of the head centre → death fires right at the
+  // border (matches the "good" feel) and the same distance every time.
+  const reach = CELL*0.35;
+  if(deadly(cellX(hpx+dir.x*reach), cellY(hpy+dir.y*reach))){ gameOver(); return; }
+  // Backup: the head's own centre cell, in case it ever lands inside one.
+  if(deadly(headGx,headGy)){ gameOver(); return; }
 
   // ── SELF COLLISION (pixel distance, skip just after wrap) ──
   if(justWrapped>0) return;
