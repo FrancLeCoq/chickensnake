@@ -577,6 +577,7 @@ let bgCache=null, foods=[], obstacles=[];
 let animals=[];   // {type,px,py,vx,vy,ph}
 let bombs=[];     // {gx,gy,armed,bornAt,phase} phase: 'safe'->'armed'->boom
 let tornadoes=[]; // [{px,py,tx,ty,ph}]
+let pickups=[];   // transient collect-glow effects [{x,y,t0,t}]
 let lastMilestone=0; // last 20-pt threshold processed
 function mkTornado(){ return {px:(1+Math.random()*(COLS-2))*CELL, py:(1+Math.random()*(ROWS-2))*CELL, tx:(1+Math.random()*(COLS-2))*CELL, ty:(1+Math.random()*(ROWS-2))*CELL, ph:0}; }
 let castleActive=false;
@@ -615,25 +616,26 @@ function startLevel(id){
   // ── obstacles FIRST (needed to choose a safe start) ──
   obstacles=c.obs.map(o=>({gx:Math.min(o[0],COLS-1),gy:Math.min(o[1],ROWS-1)})).filter((o,i,a)=>a.findIndex(b=>b.gx===o.gx&&b.gy===o.gy)===i);
 
-  // ── choose a SAFE start: a horizontal run of 3 free cells, heading right ──
+  // ── choose a SAFE start: head right with the LONGEST clear runway, body to
+  //    its left. Maximising the runway (instead of taking the first 3-in-a-row)
+  //    stops the head from spawning a cell away from a wall or boxed inside a
+  //    tight layout like the labyrinth — which made it die instantly. ──
   const isBlocked=(gx,gy)=>{
     if(c.walls && (gx<1||gx>=COLS-1||gy<1||gy>=ROWS-1)) return true;
     if(gx<0||gx>=COLS||gy<0||gy>=ROWS) return true;
     return obstacles.some(o=>o.gx===gx&&o.gy===gy);
   };
-  let sx=4, sy=Math.floor(ROWS/2), found=false;
-  // search rows from middle outward, find x where x-2..x are all free
-  const rowsOrder=[];
   const midR=Math.floor(ROWS/2);
-  for(let off=0; off<ROWS; off++){
-    if(midR-off>=0) rowsOrder.push(midR-off);
-    if(off>0 && midR+off<ROWS) rowsOrder.push(midR+off);
-  }
-  outer:
-  for(const gy of rowsOrder){
+  let sx=Math.floor(COLS/2), sy=midR, bestRun=-1;
+  for(let gy=1; gy<ROWS-1; gy++){
     for(let gx=3; gx<COLS-1; gx++){
-      if(!isBlocked(gx,gy)&&!isBlocked(gx-1,gy)&&!isBlocked(gx-2,gy)&&!isBlocked(gx+1,gy)){
-        sx=gx; sy=gy; found=true; break outer;
+      // head cell + the two body cells to its left must be free
+      if(isBlocked(gx,gy)||isBlocked(gx-1,gy)||isBlocked(gx-2,gy)) continue;
+      // how far right can the head travel before hitting something?
+      let run=0; while(gx+run+1<COLS && !isBlocked(gx+run+1,gy)) run++;
+      // longest runway wins; ties go to the row closest to the middle
+      if(run>bestRun || (run===bestRun && Math.abs(gy-midR)<Math.abs(sy-midR))){
+        bestRun=run; sx=gx; sy=gy;
       }
     }
   }
@@ -646,7 +648,7 @@ function startLevel(id){
   for(let i=0;i<seedLen;i++){ path.push({x:hpx-i, y:hpy, d:-i}); }
 
   // ── entities ──
-  animals=[]; bombs=[]; tornadoes=[]; castleActive=!!c.castle; bombTimer=0; lastMilestone=0; maxBombs=1;
+  animals=[]; bombs=[]; tornadoes=[]; pickups=[]; castleActive=!!c.castle; bombTimer=0; lastMilestone=0; maxBombs=1;
   if(c.animals){
     const mk=(type,n)=>{for(let k=0;k<n;k++){
       const a={type, px:(1+Math.random()*(COLS-2))*CELL, py:(1+Math.random()*(ROWS-2))*CELL, ph:Math.random()*6.28};
@@ -840,14 +842,10 @@ function onGridCross(){
    they felt completely dead. The pixel leading-edge test below is frame-rate
    independent: it kills the instant the head's front touches a deadly tile. */
 function checkDeath(){
-  if(bInv) return;
   const c=lcfg();
 
-  // What counts as a deadly tile.
   const isWall =(gx,gy)=> c.walls && (gx<1||gx>=COLS-1||gy<1||gy>=ROWS-1);
   const isObs  =(gx,gy)=> obstacles.some(o=> o.gx===gx && o.gy===gy && !(o.bomb && o.armed===false));
-  const isBomb =(gx,gy)=> bombs.some(b=> b.armed && b.gx===gx && b.gy===gy);
-  const deadly =(gx,gy)=> isWall(gx,gy) || isObs(gx,gy) || isBomb(gx,gy);
   // Pixel → grid cell, wrap-aware (board can scroll by whole spans on wrap levels).
   const cellX =(px)=> Math.floor((((px%PFW)+PFW)%PFW)/CELL);
   const cellY =(py)=> Math.floor((((py%PFH)+PFH)%PFH)/CELL);
@@ -855,9 +853,19 @@ function checkDeath(){
   // Leading edge ~0.35 cell ahead of the head centre → death fires right at the
   // border (matches the "good" feel) and the same distance every time.
   const reach = CELL*0.35;
-  if(deadly(cellX(hpx+dir.x*reach), cellY(hpy+dir.y*reach))){ gameOver(); return; }
-  // Backup: the head's own centre cell, in case it ever lands inside one.
-  if(deadly(headGx,headGy)){ gameOver(); return; }
+  const eGx = cellX(hpx+dir.x*reach), eGy = cellY(hpy+dir.y*reach);
+
+  // ── STATIC TERRAIN (walls + obstacles) is ALWAYS lethal, even during the
+  //    spawn grace or the invincibility bonus. Immunity only shields moving
+  //    hazards — you can never pass through a wall or an obstacle. ──
+  if(isWall(eGx,eGy)||isObs(eGx,eGy)||isWall(headGx,headGy)||isObs(headGx,headGy)){ gameOver(); return; }
+
+  // Everything below is shielded while invincible.
+  if(bInv) return;
+
+  // ── ARMED BOMBS ──
+  const isBomb =(gx,gy)=> bombs.some(b=> b.armed && b.gx===gx && b.gy===gy);
+  if(isBomb(eGx,eGy)||isBomb(headGx,headGy)){ gameOver(); return; }
 
   // ── SELF COLLISION (pixel distance, skip just after wrap) ──
   if(justWrapped>0) return;
@@ -894,6 +902,7 @@ function checkPixelPickup(){
     const fx=f.gx*CELL+CELL/2, fy=f.gy*CELL+CELL/2;
     if(Math.hypot(wx-fx,wy-fy) < CELL*0.55){
       foods.splice(k,1);
+      pickups.push({x:fx, y:fy, t0:performance.now(), t:f.t}); // soft collect glow
       let pts=f.t==='g'?10:f.t==='v'?5:f.t==='r'?3:1;
       if(bDouble)pts*=2;
       score+=pts;
@@ -1081,10 +1090,35 @@ function drawFrame(now){
   if(castleActive) drawCastle(now);
   bombs.forEach(b=>drawBomb(b,now));
   foods.forEach(f=>drawFood(f,now));
+  drawPickups(now);
   animals.forEach(a=>drawAnimal(a,now));
   for(let i=segGrids.length-1;i>=1;i--)drawPoussin(i,now);
   drawCoq(now);
   for(const tor of tornadoes) drawTornado(tor,now);
+}
+/* Soft, very subtle glow where a chick was just collected. */
+function drawPickups(now){
+  const DUR=520;
+  for(let i=pickups.length-1;i>=0;i--){
+    const p=pickups[i];
+    const age=now-p.t0;
+    if(age>=DUR){ pickups.splice(i,1); continue; }
+    const k=age/DUR;                 // 0..1
+    const ease=1-Math.pow(1-k,2);    // fast then settle
+    const r=CELL*(0.30+ease*0.65);
+    const a=(1-k)*0.26;              // gentle fade-out
+    const col = p.t==='g'?'255,215,0' : p.t==='v'?'176,112,255' : p.t==='r'?'120,220,255' : '180,240,150';
+    ctx.save();
+    ctx.translate(wrapX(p.x), wrapY(p.y));
+    const g=ctx.createRadialGradient(0,0,r*0.15,0,0,r);
+    g.addColorStop(0,`rgba(${col},${a*0.55})`);
+    g.addColorStop(0.55,`rgba(${col},${a*0.30})`);
+    g.addColorStop(1,`rgba(${col},0)`);
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(0,0,r,0,6.28); ctx.fill();
+    ctx.globalAlpha=a; ctx.strokeStyle=`rgba(${col},0.85)`; ctx.lineWidth=2*(1-k);
+    ctx.beginPath(); ctx.arc(0,0,r*0.9,0,6.28); ctx.stroke();
+    ctx.restore();
+  }
 }
 /* ---- Castle (center, inside the wall ring) ---- */
 function drawCastle(now){
