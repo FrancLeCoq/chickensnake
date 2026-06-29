@@ -568,11 +568,12 @@ cv.width=W; cv.height=H;
 const ctx=cv.getContext('2d');
 
 let lvlId=1, score=0;
-let dir={x:1,y:0}, ndir={x:1,y:0};
+let dir={x:1,y:0};
+let turnQ=[];   // up to 2 pending turns, applied one per grid crossing
 let running=false, rafId=null;
 let tickDur=160, pixelSpeed=CELL/160;
 let bDouble=false, bInv=false;
-let bStock={slow:0,inv:0,x2:0,rmO:0,turbo:0};
+let bStock={inv:0,x2:0,rmO:0,turbo:0};
 let bgCache=null, foods=[], obstacles=[];
 let animals=[];   // {type,px,py,vx,vy,ph}
 let bombs=[];     // {gx,gy,armed,bornAt,phase} phase: 'safe'->'armed'->boom
@@ -609,9 +610,9 @@ function startLevel(id){
   closeModal();
   lvlId=id; score=0; bDouble=false; bInv=false;
   const cumul=getCumul();
-  bStock={slow:cumul>=200?1:0,inv:cumul>=400?1:0,turbo:cumul>=600?1:0,x2:cumul>=800?1:0,rmO:cumul>=1000?1:0};
+  bStock={inv:cumul>=400?1:0,turbo:cumul>=600?1:0,x2:cumul>=800?1:0,rmO:cumul>=1000?1:0};
   const c=lcfg(); tickDur=c.spd; pixelSpeed=CELL/tickDur;
-  dir={x:1,y:0}; ndir={x:1,y:0}; hdx=pixelSpeed; hdy=0; facing=1; growth=0; justWrapped=0;
+  dir={x:1,y:0}; turnQ=[]; hdx=pixelSpeed; hdy=0; facing=1; growth=0; justWrapped=0;
 
   // ── obstacles FIRST (needed to choose a safe start) ──
   obstacles=c.obs.map(o=>({gx:Math.min(o[0],COLS-1),gy:Math.min(o[1],ROWS-1)})).filter((o,i,a)=>a.findIndex(b=>b.gx===o.gx&&b.gy===o.gy)===i);
@@ -723,7 +724,7 @@ function updHUD(){
 function renderBonus(){
   const bar=document.getElementById('bonusBar'); bar.innerHTML='';
   const cumul=getCumul();
-  [{k:'slow',l:t('bonusSlow'),r:200},{k:'inv',l:t('bonusInv'),r:400},{k:'turbo',l:t('bonusTurbo'),r:600},{k:'x2',l:t('bonusX2'),r:800},{k:'rmO',l:t('bonusRm'),r:1000}].forEach(d=>{
+  [{k:'inv',l:t('bonusInv'),r:400},{k:'turbo',l:t('bonusTurbo'),r:600},{k:'x2',l:t('bonusX2'),r:800},{k:'rmO',l:t('bonusRm'),r:1000}].forEach(d=>{
     if(cumul<d.r)return;
     const b=document.createElement('button');
     b.className='bonus-btn'+(bStock[d.k]<=0?' used':'');
@@ -736,7 +737,6 @@ function useBonus(k,btn){
   if(bStock[k]<=0)return;
   bStock[k]=0; btn.classList.add('used'); btn.textContent+=' ✓';
   let spd=lcfg().spd;
-  if(k==='slow'){spd=Math.min(spd*1.8,360);pixelSpeed=CELL/spd;toast(t('bonusSlow'));}
   if(k==='turbo'){spd=Math.max(spd*.5,50);pixelSpeed=CELL/spd;toast(t('bonusTurbo'));}
   if(k==='inv'){bInv=true;toast(t('bonusInv'));setTimeout(()=>{bInv=false;},8000);}
   if(k==='x2'){bDouble=true;toast(t('bonusX2'));setTimeout(()=>bDouble=false,60000);}
@@ -799,7 +799,7 @@ function onGridCross(){
 
   // 2. NOW apply the queued turn — it pivots from THIS cell's centre, exactly
   //    where the head is, instead of one cell back.
-  if(ndir.x!==-dir.x||ndir.y!==-dir.y){ dir={...ndir}; hdx=dir.x*pixelSpeed; hdy=dir.y*pixelSpeed; }
+  if(turnQ.length){ const nd=turnQ.shift(); if(nd.x!==-dir.x||nd.y!==-dir.y){ dir={x:nd.x,y:nd.y}; hdx=dir.x*pixelSpeed; hdy=dir.y*pixelSpeed; } }
 
   // ── ANTI-DRIFT: snap head pixel to the new cell center, then re-apply the
   //    leftover sub-cell distance along the CURRENT direction. This keeps the
@@ -1090,10 +1090,10 @@ function drawFrame(now){
   if(castleActive) drawCastle(now);
   bombs.forEach(b=>drawBomb(b,now));
   foods.forEach(f=>drawFood(f,now));
-  drawPickups(now);
   animals.forEach(a=>drawAnimal(a,now));
   for(let i=segGrids.length-1;i>=1;i--)drawPoussin(i,now);
   drawCoq(now);
+  drawPickups(now); // on top of the coq so the collect glow is actually visible
   for(const tor of tornadoes) drawTornado(tor,now);
 }
 /* Soft, very subtle glow where a chick was just collected. */
@@ -1105,8 +1105,8 @@ function drawPickups(now){
     if(age>=DUR){ pickups.splice(i,1); continue; }
     const k=age/DUR;                 // 0..1
     const ease=1-Math.pow(1-k,2);    // fast then settle
-    const r=CELL*(0.30+ease*0.65);
-    const a=(1-k)*0.26;              // gentle fade-out
+    const r=CELL*(0.34+ease*0.95);   // expands clearly beyond the coq
+    const a=(1-k)*0.30;              // gentle fade-out
     const col = p.t==='g'?'255,215,0' : p.t==='v'?'176,112,255' : p.t==='r'?'120,220,255' : '180,240,150';
     ctx.save();
     ctx.translate(wrapX(p.x), wrapY(p.y));
@@ -1364,21 +1364,37 @@ function drawFood(f,now){
 }
 
 /* ---------- Controls ---------- */
-function press(x,y){
-  if(x!==-dir.x||y!==-dir.y){ ndir={x,y}; }
+// Queue a turn. Validated against the last queued turn (or the live direction)
+// so U-turns and duplicates are ignored. Keeps at most 2 pending turns so a
+// quick two-step gesture (e.g. right-then-down) is never swallowed.
+function queueTurn(x,y){
+  const ref = turnQ.length ? turnQ[turnQ.length-1] : dir;
+  if((x===ref.x && y===ref.y) || (x===-ref.x && y===-ref.y)) return;
+  if(turnQ.length>=2) return;
+  turnQ.push({x,y});
 }
+function press(x,y){ queueTurn(x,y); }
 const KM={ArrowUp:{x:0,y:-1},ArrowDown:{x:0,y:1},ArrowLeft:{x:-1,y:0},ArrowRight:{x:1,y:0},w:{x:0,y:-1},s:{x:0,y:1},a:{x:-1,y:0},d:{x:1,y:0}};
 document.addEventListener('keydown',e=>{
-  if(KM[e.key]){const d=KM[e.key];if(d.x!==-dir.x||d.y!==-dir.y)ndir=d;e.preventDefault();}
+  if(KM[e.key]){const d=KM[e.key];queueTurn(d.x,d.y);e.preventDefault();}
 });
+// Continuous swipe steering: the turn fires DURING the drag (touchmove), not on
+// release, and the anchor re-centres after each turn so a long sweep can chain
+// several turns. SWIPE_MIN small = sensitive.
 let ts=null;
+const SWIPE_MIN=12;
+function steer(cx,cy){
+  if(!ts) return;
+  const dx=cx-ts.x, dy=cy-ts.y;
+  if(Math.max(Math.abs(dx),Math.abs(dy))<SWIPE_MIN) return;
+  if(Math.abs(dx)>Math.abs(dy)) queueTurn(dx>0?1:-1,0);
+  else queueTurn(0,dy>0?1:-1);
+  ts={x:cx,y:cy};
+}
 cv.addEventListener('touchstart',e=>{const tt=e.touches[0];ts={x:tt.clientX,y:tt.clientY};e.preventDefault();},{passive:false});
+cv.addEventListener('touchmove',e=>{const tt=e.touches[0];steer(tt.clientX,tt.clientY);e.preventDefault();},{passive:false});
 cv.addEventListener('touchend',e=>{
-  if(!ts)return;
-  const tt=e.changedTouches[0],dx=tt.clientX-ts.x,dy=tt.clientY-ts.y;
-  if(Math.max(Math.abs(dx),Math.abs(dy))<8){ts=null;return;}
-  if(Math.abs(dx)>Math.abs(dy)){const d=dx>0?{x:1,y:0}:{x:-1,y:0};if(d.x!==-dir.x)ndir=d;}
-  else{const d=dy>0?{x:0,y:1}:{x:0,y:-1};if(d.y!==-dir.y)ndir=d;}
+  if(ts){const tt=e.changedTouches[0];steer(tt.clientX,tt.clientY);}
   ts=null;e.preventDefault();
 },{passive:false});
 
